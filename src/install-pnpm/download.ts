@@ -2,90 +2,111 @@ import { HttpClient } from '@actions/http-client'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { createReadStream, createWriteStream, existsSync } from 'fs'
-import { chmod, copyFile, link, mkdir, rename, rm } from 'fs/promises'
+import { chmod, copyFile, link, mkdir, rm } from 'fs/promises'
 import path from 'path'
 import { pipeline } from 'stream/promises'
 import semver from 'semver'
 
-// Since v12 pnpm is a standalone native executable, published per platform as
-// `@pnpm/exe.<os>-<arch>`. Earlier versions are Node.js programs that this
-// action cannot install.
-const MIN_SUPPORTED_MAJOR = 12
+// The action downloads pnpm's self-contained release archive and uses
+// `pnpm runtime` to install a JavaScript runtime. Both are available from v11
+// onward, so that is the oldest major this action can install.
+const MIN_SUPPORTED_MAJOR = 11
 
 const REGISTRY = 'https://registry.npmjs.org'
 // Abbreviated packuments are much smaller than full ones and still carry the
-// per-version dist metadata needed to download and verify tarballs.
+// per-version metadata needed to resolve a version spec.
 const ABBREVIATED_PACKUMENT = 'application/vnd.npm.install-v1+json'
+
+const GITHUB_API = 'https://api.github.com'
 
 export interface ResolvedPnpm {
   readonly version: string
-  readonly tarballUrl: string
-  readonly integrity: string
+  readonly downloadUrl: string
+  // Hex-encoded SHA-256 of the release archive, from the GitHub asset `digest`.
+  readonly sha256: string
+  readonly archive: 'tar.gz' | 'zip'
 }
 
 interface AbbreviatedPackument {
-  readonly versions: Record<string, { dist: { tarball: string; integrity?: string } }>
+  readonly versions: Record<string, unknown>
+}
+
+interface GitHubAsset {
+  readonly name: string
+  readonly digest?: string
+  readonly browser_download_url: string
+}
+
+interface GitHubRelease {
+  readonly assets: readonly GitHubAsset[]
 }
 
 // HTTPS_PROXY/NO_PROXY are honored automatically by @actions/http-client.
 const http = new HttpClient('pnpm/setup', undefined, { allowRetries: true, maxRetries: 3 })
 
-export async function resolvePnpm(spec: string): Promise<ResolvedPnpm> {
-  const platform = getPlatformKey()
-  const exePackage = `@pnpm/exe.${platform}`
-  const packument = await fetchJson<AbbreviatedPackument>(
-    `${REGISTRY}/${exePackage.replaceAll('/', '%2f')}`,
-    { accept: ABBREVIATED_PACKUMENT },
-  )
-
-  const version = await resolveVersion(spec, Object.keys(packument.versions))
+export async function resolvePnpm(spec: string, token?: string): Promise<ResolvedPnpm> {
+  const version = await resolveVersion(spec)
   if (semver.major(version) < MIN_SUPPORTED_MAJOR) {
-    throw new Error(`The requested pnpm version "${spec}" resolved to ${version}, but this action only installs pnpm v12 or newer.
-Since v12, pnpm is a standalone executable that needs no Node.js or npm; this action does not support the Node.js-based pnpm versions.
-To install pnpm 11 or older, use the pnpm/action-setup action instead.`)
+    throw new Error(`The requested pnpm version "${spec}" resolved to ${version}, but this action only installs pnpm v${MIN_SUPPORTED_MAJOR} or newer.
+This action downloads pnpm's self-contained release binary and uses \`pnpm runtime\` to install a JavaScript runtime; both are available from v${MIN_SUPPORTED_MAJOR} onward.
+To install older pnpm, use the pnpm/action-setup action instead.`)
   }
 
-  const entry = packument.versions[version]
-  if (!entry) {
-    throw new Error(`pnpm ${version} has no standalone executable published for ${platform} (${exePackage}).`)
+  const platform = getPlatform()
+  const asset = assetName(platform)
+  const release = await fetchRelease(version, token)
+  const found = release.assets.find((a) => a.name === asset)
+  if (!found) {
+    const isIntelMac = semver.major(version) === 11 && platform.os === 'darwin' && platform.arch === 'x64'
+    throw new Error(`pnpm ${version} has no ${asset} release asset for your platform. `
+      + (isIntelMac
+        ? 'pnpm v11 ships no binary for Intel macOS (darwin-x64); use v12 or newer there.'
+        : `See https://github.com/pnpm/pnpm/releases/tag/v${version} for the available assets.`))
   }
-  const { tarball, integrity } = entry.dist
-  if (!integrity?.startsWith('sha512-')) {
-    throw new Error(`Unexpected integrity metadata for ${exePackage}@${version}: ${integrity ?? '<missing>'}`)
+  if (!found.digest?.startsWith('sha256:')) {
+    throw new Error(`Release asset ${asset} for pnpm ${version} has no sha256 digest (got ${found.digest ?? '<missing>'}).`)
   }
-  return { version, tarballUrl: tarball, integrity }
+  return {
+    version,
+    downloadUrl: found.browser_download_url,
+    sha256: found.digest.slice('sha256:'.length),
+    archive: platform.os === 'win32' ? 'zip' : 'tar.gz',
+  }
 }
 
 /**
- * Downloads the pnpm executable into `destDir` and returns its path.
- * Also links the `pnpx`, `pn`, and `pnx` aliases next to it — the binary
- * dispatches on the name it was invoked as.
+ * Downloads and extracts the pnpm release archive into `destDir`, returning the
+ * path to the `pnpm` executable. The archive holds the executable at its root
+ * plus, for Node-SEA builds (v11), a sibling `dist/` it loads at runtime — the
+ * whole archive is extracted so that layout is preserved. The `pnpx`, `pn`, and
+ * `pnx` aliases are linked next to the binary, which dispatches on the name it
+ * was invoked as.
  */
 export async function downloadPnpm(resolved: ResolvedPnpm, destDir: string): Promise<string> {
   const tmpDir = path.join(destDir, '.download')
   await mkdir(tmpDir, { recursive: true })
 
-  const tarball = path.join(tmpDir, 'pnpm.tgz')
-  const response = await http.get(resolved.tarballUrl)
+  const archivePath = path.join(tmpDir, resolved.archive === 'zip' ? 'pnpm.zip' : 'pnpm.tgz')
+  const response = await http.get(resolved.downloadUrl)
   if (response.message.statusCode !== 200) {
     response.message.resume()
-    throw new Error(`Failed to download ${resolved.tarballUrl}: HTTP ${response.message.statusCode}`)
+    throw new Error(`Failed to download ${resolved.downloadUrl}: HTTP ${response.message.statusCode}`)
   }
-  await pipeline(response.message, createWriteStream(tarball))
-  await verifyIntegrity(tarball, resolved.integrity, resolved.tarballUrl)
+  await pipeline(response.message, createWriteStream(archivePath))
+  await verifySha256(archivePath, resolved.sha256, resolved.downloadUrl)
+
+  await extractArchive(archivePath, destDir, resolved.archive)
+  await rm(tmpDir, { recursive: true, force: true })
 
   const exe = process.platform === 'win32' ? 'pnpm.exe' : 'pnpm'
-  await extractTarball(tarball, tmpDir, `package/${exe}`)
-
   const pnpmBin = path.join(destDir, exe)
-  await rename(path.join(tmpDir, 'package', exe), pnpmBin)
   if (process.platform !== 'win32') {
     await chmod(pnpmBin, 0o755)
   }
-  await rm(tmpDir, { recursive: true, force: true })
 
   for (const alias of ['pnpx', 'pn', 'pnx']) {
     const aliasPath = path.join(destDir, process.platform === 'win32' ? `${alias}.exe` : alias)
+    await rm(aliasPath, { force: true })
     try {
       await link(pnpmBin, aliasPath)
     } catch {
@@ -96,18 +117,31 @@ export async function downloadPnpm(resolved: ResolvedPnpm, destDir: string): Pro
   return pnpmBin
 }
 
-function getPlatformKey(): string {
+interface Platform {
+  readonly os: 'linux' | 'darwin' | 'win32'
+  readonly arch: 'x64' | 'arm64'
+  readonly musl: boolean
+}
+
+function getPlatform(): Platform {
   const arch = process.arch
   if (arch !== 'x64' && arch !== 'arm64') {
     throw new Error(`Unsupported CPU architecture "${arch}". pnpm provides executables for x64 and arm64.`)
   }
-  switch (process.platform) {
-    case 'win32': return `win32-${arch}`
-    case 'darwin': return `darwin-${arch}`
-    case 'linux': return `linux-${arch}${isMusl() ? '-musl' : ''}`
-    default:
-      throw new Error(`Unsupported platform "${process.platform}". pnpm provides executables for Windows, macOS, and Linux.`)
+  const os = process.platform
+  if (os !== 'linux' && os !== 'darwin' && os !== 'win32') {
+    throw new Error(`Unsupported platform "${os}". pnpm provides executables for Windows, macOS, and Linux.`)
   }
+  return { os, arch, musl: os === 'linux' && isMusl() }
+}
+
+// Release assets are named `pnpm-<os>-<arch>[-musl].tar.gz`, except Windows
+// which ships a `.zip` (e.g. `pnpm-linux-x64.tar.gz`, `pnpm-linux-x64-musl.tar.gz`,
+// `pnpm-darwin-arm64.tar.gz`, `pnpm-win32-x64.zip`).
+function assetName(platform: Platform): string {
+  const { os, arch, musl } = platform
+  if (os === 'win32') return `pnpm-win32-${arch}.zip`
+  return `pnpm-${os}-${arch}${musl ? '-musl' : ''}.tar.gz`
 }
 
 function isMusl(): boolean {
@@ -116,30 +150,62 @@ function isMusl(): boolean {
   return existsSync('/etc/alpine-release')
 }
 
-async function resolveVersion(spec: string, available: string[]): Promise<string> {
+async function fetchRelease(version: string, token?: string): Promise<GitHubRelease> {
+  const headers: Record<string, string> = {
+    accept: 'application/vnd.github+json',
+    'x-github-api-version': '2022-11-28',
+  }
+  // A token lifts the anonymous 60-req/hour rate limit; the action defaults it
+  // to the workflow's GITHUB_TOKEN. Anonymous requests still work without one.
+  if (token) headers.authorization = `Bearer ${token}`
+
+  const url = `${GITHUB_API}/repos/pnpm/pnpm/releases/tags/v${version}`
+  const response = await http.getJson<GitHubRelease>(url, headers)
+  if (response.statusCode === 404) {
+    throw new Error(`pnpm ${version} has no GitHub release (tag v${version}). Some prerelease versions are published to npm but not released as downloadable binaries — pick a version with a published release: https://github.com/pnpm/pnpm/releases`)
+  }
+  // Any other non-200 (403 rate limit, 401 bad token, 5xx, …) still yields a
+  // parsed JSON error body as `result`; reject on status so it never reaches
+  // the caller as a bogus release.
+  if (response.statusCode !== 200 || response.result == null) {
+    throw new Error(`Failed to fetch the pnpm ${version} release from ${url}: HTTP ${response.statusCode}.`)
+  }
+  return response.result
+}
+
+async function resolveVersion(spec: string): Promise<string> {
   const exact = semver.valid(spec)
   if (exact) return exact
 
   if (semver.validRange(spec)) {
-    // Prefer stable releases; fall back to prereleases so ranges like `12` or
-    // `^12.0.0` resolve while v12 has only prerelease versions published.
+    // Resolve ranges against the `pnpm` packument, which lists every published
+    // version. Prefer stable releases; fall back to prereleases so ranges like
+    // `12` or `^12.0.0` resolve while v12 has only prerelease versions published.
+    const available = await fetchPnpmVersions()
     const resolved = semver.maxSatisfying(available, spec)
       ?? semver.maxSatisfying(available, spec, { includePrerelease: true })
     if (!resolved) {
-      throw new Error(`No pnpm executable version matches "${spec}". Published versions: ${available.join(', ')}`)
+      throw new Error(`No pnpm version matches "${spec}".`)
     }
     return resolved
   }
 
-  // Anything else is treated as a dist-tag (e.g. `next-12`). Dist-tags are
-  // read from the main `pnpm` package — the authoritative source; the
-  // per-platform packages carry stale tags.
+  // Anything else is treated as a dist-tag (e.g. `next-12`), read from the main
+  // `pnpm` package.
   const distTags = await fetchJson<Record<string, string>>(`${REGISTRY}/-/package/pnpm/dist-tags`)
   const version = distTags[spec]
   if (!version) {
     throw new Error(`"${spec}" is neither a valid pnpm version, a semver range, nor a known dist-tag of pnpm.`)
   }
   return version
+}
+
+async function fetchPnpmVersions(): Promise<string[]> {
+  const packument = await fetchJson<AbbreviatedPackument>(
+    `${REGISTRY}/pnpm`,
+    { accept: ABBREVIATED_PACKUMENT },
+  )
+  return Object.keys(packument.versions)
 }
 
 async function fetchJson<T>(url: string, headers?: Record<string, string>): Promise<T> {
@@ -150,24 +216,24 @@ async function fetchJson<T>(url: string, headers?: Record<string, string>): Prom
   return response.result
 }
 
-async function verifyIntegrity(file: string, expected: string, url: string): Promise<void> {
-  const hash = createHash('sha512')
+async function verifySha256(file: string, expectedHex: string, url: string): Promise<void> {
+  const hash = createHash('sha256')
   await pipeline(createReadStream(file), hash)
-  const actual = `sha512-${hash.digest('base64')}`
-  if (actual !== expected) {
+  const actual = hash.digest('hex')
+  if (actual !== expectedHex.toLowerCase()) {
     throw new Error(`Integrity check failed for ${url}.
-  Expected: ${expected}
-  Actual:   ${actual}`)
+  Expected sha256: ${expectedHex}
+  Actual sha256:   ${actual}`)
   }
 }
 
-function extractTarball(tarball: string, destDir: string, entry: string): Promise<void> {
-  // A tar executable is available on all GitHub-hosted runners, including
-  // Windows (bsdtar ships with Windows since 2019). Only the pnpm binary
-  // entry is extracted — the archive holds nothing else the action needs.
-  // Backslashes are converted to forward slashes because MSYS-based tar
-  // implementations misread them.
-  const args = ['-xzf', tarball.replace(/\\/g, '/'), '-C', destDir.replace(/\\/g, '/'), entry]
+function extractArchive(archivePath: string, destDir: string, archive: 'tar.gz' | 'zip'): Promise<void> {
+  // A tar executable is available on all GitHub-hosted runners. GNU tar
+  // (Linux/macOS) handles the `.tar.gz` assets; the `tar` on Windows runners is
+  // bsdtar, which also unpacks the `.zip` assets. Backslashes are converted to
+  // forward slashes because MSYS-based tar implementations misread them.
+  const flags = archive === 'zip' ? '-xf' : '-xzf'
+  const args = [flags, archivePath.replace(/\\/g, '/'), '-C', destDir.replace(/\\/g, '/')]
   return new Promise<void>((resolve, reject) => {
     const cp = spawn('tar', args, { stdio: ['ignore', 'inherit', 'inherit'] })
     cp.on('error', (error: NodeJS.ErrnoException) => {
@@ -179,7 +245,7 @@ function extractTarball(tarball: string, destDir: string, entry: string): Promis
       if (code === 0) {
         resolve()
       } else {
-        reject(new Error(`tar exited with code ${code} while extracting ${entry} from ${tarball}`))
+        reject(new Error(`tar exited with code ${code} while extracting ${archivePath}`))
       }
     })
   })

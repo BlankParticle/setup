@@ -8,8 +8,8 @@ inputs:
     description: |
       Version of pnpm to install: an exact version (`12.0.0-alpha.17`), a
       semver range (`^12.0.0`), or an npm dist-tag (`next-12`). Must resolve
-      to pnpm v12 or newer — since v12, pnpm is a standalone executable, and
-      the action downloads it directly without needing Node.js or npm.
+      to pnpm v11 or newer — the action downloads pnpm's native per-platform
+      executable directly, without needing Node.js or npm.
 
       When omitted, the version is read from `devEngines.packageManager` or
       `packageManager` in the project's package.json.
@@ -59,6 +59,13 @@ inputs:
       need pnpm itself (e.g. `pnpm audit`, lockfile-only regeneration).
     required: false
     default: 'true'
+  token:
+    description: |
+      GitHub token used to look up the pnpm release (and its asset checksum)
+      via the GitHub API. Defaults to the workflow's automatic token, which
+      lifts the low anonymous API rate limit. Rarely needs to be set.
+    required: false
+    default: ${{ github.token }}
 outputs:
   dest:
     description: Expanded path of inputs#dest
