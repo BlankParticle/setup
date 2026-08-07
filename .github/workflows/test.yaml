@@ -29,7 +29,7 @@ jobs:
             version: '12.0.0-beta.4'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: pnpm
         uses: ./
@@ -69,7 +69,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: pnpm
         uses: ./
@@ -130,7 +130,7 @@ jobs:
     name: 'Runtime node + install on pnpm 11'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up a synthetic package.json
         # Use a fresh manifest (and drop the repo lockfile) so `pnpm install`
@@ -188,7 +188,7 @@ jobs:
     name: 'Version from dist-tag (next-12)'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ./
         with:
@@ -213,7 +213,7 @@ jobs:
     name: 'Version from semver range (^12.0.0-0)'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: ./
         with:
@@ -248,7 +248,7 @@ jobs:
             major: '22'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: pnpm
         uses: ./
@@ -291,7 +291,7 @@ jobs:
     name: Runtime bun
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./
         with:
           version: '12.0.0-beta.4'
@@ -307,7 +307,7 @@ jobs:
     name: Runtime deno
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./
         with:
           version: '12.0.0-beta.4'
@@ -326,7 +326,7 @@ jobs:
     name: 'Runtime from devEngines.runtime'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up package.json with devEngines.runtime
         # Remove the action's own pnpm-lock.yaml so `pnpm install` doesn't
@@ -385,7 +385,7 @@ jobs:
     name: 'Explicit runtime overrides devEngines.runtime'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up package.json with conflicting devEngines.runtime
         run: |
@@ -430,7 +430,7 @@ jobs:
     name: 'runtime version falls back to devEngines'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up package.json with devEngines.runtime version
         run: |
@@ -467,7 +467,7 @@ jobs:
     name: 'install: false skips pnpm install'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up package.json with a dependency
         run: |
@@ -506,7 +506,7 @@ jobs:
     name: 'No runtime, no manifest'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: pnpm
         uses: ./
