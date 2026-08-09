@@ -424,6 +424,103 @@ jobs:
           fi
         shell: bash
 
+  runtime-survives-context-shims:
+    # pnpm 12 links the global `node` bin as a context-aware shim that would
+    # switch to the version the project pins in devEngines.runtime. The
+    # exported PNPM_CONFIG_GLOBAL_SHIMS must keep the installed runtime
+    # authoritative for every later step.
+    name: 'Installed runtime beats context-aware shims'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up package.json with conflicting devEngines.runtime
+        run: |
+          rm -f pnpm-lock.yaml
+          cat > package.json <<'EOF'
+          {
+            "packageManager": "pnpm@12.0.0-rc.2",
+            "devEngines": {
+              "runtime": { "name": "node", "version": "20.19.0", "onFail": "download" }
+            }
+          }
+          EOF
+        shell: bash
+
+      - uses: ./
+        with:
+          runtime: node@22
+
+      - name: 'Test: node 22 runs inside the project'
+        run: |
+          set -e
+          actual="$(node --version)"
+          echo "node --version: ${actual}"
+          case "${actual}" in
+            v22.*) ;;
+            *) echo "Expected node v22.x, got ${actual} — the context-aware shim switched to the project's pin"; exit 1 ;;
+          esac
+          echo "PNPM_CONFIG_GLOBAL_SHIMS: ${PNPM_CONFIG_GLOBAL_SHIMS}"
+          if [ "${PNPM_CONFIG_GLOBAL_SHIMS}" != '{"node":false}' ]; then
+            echo 'Expected PNPM_CONFIG_GLOBAL_SHIMS={"node":false}'
+            exit 1
+          fi
+        shell: bash
+
+  context-shims-opt-out:
+    # The counterpart to the job above, and its canary: a workflow that sets
+    # the setting itself keeps pnpm's switching behaviour, so the project's
+    # pin wins. If this job stops switching, the job above is no longer
+    # proving anything. Both spellings pnpm accepts are covered, since
+    # honouring only one of them would silently override the other.
+    name: 'Workflow-set ${{ matrix.env_name }} is not overwritten'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env_name: [PNPM_CONFIG_GLOBAL_SHIMS, pnpm_config_global_shims]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up package.json with conflicting devEngines.runtime
+        run: |
+          rm -f pnpm-lock.yaml
+          cat > package.json <<'EOF'
+          {
+            "packageManager": "pnpm@12.0.0-rc.2",
+            "devEngines": {
+              "runtime": { "name": "node", "version": "20.19.0", "onFail": "download" }
+            }
+          }
+          EOF
+        shell: bash
+
+      - name: Opt back into context-aware shims
+        env:
+          ENV_NAME: ${{ matrix.env_name }}
+        run: printf '%s={"node":"auto"}\n' "$ENV_NAME" >> "$GITHUB_ENV"
+        shell: bash
+
+      - uses: ./
+        with:
+          runtime: node@22
+
+      - name: "Test: the project's pin still wins"
+        run: |
+          set -e
+          echo "PNPM_CONFIG_GLOBAL_SHIMS: ${PNPM_CONFIG_GLOBAL_SHIMS}"
+          if [ "${PNPM_CONFIG_GLOBAL_SHIMS}" = '{"node":false}' ]; then
+            echo "The action overwrote the setting the workflow provided"
+            exit 1
+          fi
+          actual="$(node --version)"
+          echo "node --version: ${actual}"
+          case "${actual}" in
+            v20.19.0) ;;
+            *) echo "Expected node v20.19.0 from the context-aware shim, got ${actual}"; exit 1 ;;
+          esac
+        shell: bash
+
   runtime-version-fallback:
     # `runtime: node` without an `@<version>` suffix should fall back to the
     # version declared in devEngines.runtime.
