@@ -4,10 +4,11 @@ import saveCache from './cache-save'
 import getInputs, { Inputs } from './inputs'
 import installPnpm from './install-pnpm'
 import {
-  getInstalledRuntimeVersion,
-  resolveRuntimeRequest,
+  getInstalledRuntimeVersions,
+  resolveRuntimeRequests,
   installRuntime,
   InstalledRuntime,
+  keepInstalledRuntimesAuthoritative,
   logSkippedRuntime,
 } from './install-runtime'
 import setOutputs from './outputs'
@@ -30,13 +31,17 @@ async function runMain() {
   const result = await installPnpm(inputs)
   console.log('Installation Completed!')
 
-  const request = resolveRuntimeRequest(inputs)
-  const restoredCache = await restoreCache(inputs, request)
+  const requests = resolveRuntimeRequests(inputs)
+  const restoredCache = await restoreCache(inputs, requests)
 
-  let runtime: InstalledRuntime | undefined
-  if (request) {
-    runtime = await installRuntime(request, result.binDest)
+  const runtimes: InstalledRuntime[] = []
+  for (const request of requests) {
+    const runtime = await installRuntime(request, result.binDest)
     if (runtime === undefined) return
+    runtimes.push(runtime)
+  }
+  if (runtimes.length > 0) {
+    keepInstalledRuntimesAuthoritative(runtimes)
   } else {
     logSkippedRuntime()
   }
@@ -46,16 +51,18 @@ async function runMain() {
     // from the provisional key the restore probed with. That key must never
     // be written to: later runs match it exactly and would stop falling back
     // to the prefix search that finds the versioned caches.
-    const resolvedRuntimeVersion = request
-      ? await getInstalledRuntimeVersion(request.name, result.binDest) ?? request.version
-      : undefined
-    finalizeCache(restoredCache, resolvedRuntimeVersion)
+    const installed = await getInstalledRuntimeVersions(runtimes.map(runtime => runtime.name), result.binDest)
+    const resolved = runtimes.map(runtime => ({
+      name: runtime.name,
+      version: installed.get(runtime.name) ?? runtime.version,
+    }))
+    finalizeCache(restoredCache, resolved)
   }
 
-  setOutputs(inputs, result.binDest, runtime)
+  setOutputs(inputs, result.binDest, runtimes)
 
   if (inputs.install) {
-    pnpmInstall(inputs)
+    pnpmInstall(inputs, runtimes.length > 0)
   }
 }
 
