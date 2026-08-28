@@ -124,6 +124,58 @@ jobs:
             throw "Expected an extended-length store path, got: $storePath"
           }
 
+  runtime-cache-prime:
+    name: 'Prime runtime cache'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./
+        with:
+          version: '11.22.0'
+          runtime: node@24.19.0
+          cache: true
+
+      - name: 'Test: moving selector cache keys'
+        run: pnpm test
+
+  runtime-cache-hit:
+    name: 'Restore runtime cache'
+    needs: runtime-cache-prime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # `pnpm runtime set` always fetches SHASUMS256.txt(.sig) and index.json
+      # from nodejs.org to verify the runtime, warm store or not, so the job
+      # cannot prove the restore happened by cutting the network. What it can
+      # prove is the key scheme: a second run of the same selector must land
+      # an exact hit on the key the first run saved under the resolved
+      # version, which only holds if the restore precedes the install.
+      - id: pnpm
+        uses: ./
+        with:
+          version: '11.22.0'
+          runtime: node@24.19.0
+          cache: true
+          install: false
+
+      - name: 'Test: runtime cache was restored'
+        env:
+          CACHE_HIT: ${{ steps.pnpm.outputs.cache-hit }}
+        run: |
+          set -e
+          if [ "${CACHE_HIT}" != "true" ]; then
+            echo "Expected a runtime cache hit, got: ${CACHE_HIT}"
+            exit 1
+          fi
+          actual="$(node --version)"
+          if [ "${actual}" != "v24.19.0" ]; then
+            echo "Expected node v24.19.0, got: ${actual}"
+            exit 1
+          fi
+        shell: bash
+
   runtime-node-pnpm11:
     # The whole premise of supporting v11 is that `pnpm runtime` works there.
     # Install pnpm v11, install a runtime through it, and run `pnpm install`.

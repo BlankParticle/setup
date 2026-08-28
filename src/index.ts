@@ -1,9 +1,15 @@
 import { setFailed, saveState, getState } from '@actions/core'
-import restoreCache from './cache-restore'
+import restoreCache, { finalizeCache } from './cache-restore'
 import saveCache from './cache-save'
 import getInputs, { Inputs } from './inputs'
 import installPnpm from './install-pnpm'
-import { resolveRuntimeRequest, installRuntime, InstalledRuntime, logSkippedRuntime } from './install-runtime'
+import {
+  getInstalledRuntimeVersion,
+  resolveRuntimeRequest,
+  installRuntime,
+  InstalledRuntime,
+  logSkippedRuntime,
+} from './install-runtime'
 import setOutputs from './outputs'
 import pnpmInstall from './pnpm-install'
 import pruneStore from './pnpm-store-prune'
@@ -24,8 +30,10 @@ async function runMain() {
   const result = await installPnpm(inputs)
   console.log('Installation Completed!')
 
-  let runtime: InstalledRuntime | undefined
   const request = resolveRuntimeRequest(inputs)
+  const restoredCache = await restoreCache(inputs, request)
+
+  let runtime: InstalledRuntime | undefined
   if (request) {
     runtime = await installRuntime(request, result.binDest)
     if (runtime === undefined) return
@@ -33,9 +41,18 @@ async function runMain() {
     logSkippedRuntime()
   }
 
-  setOutputs(inputs, result.binDest, runtime)
+  if (restoredCache) {
+    // Falling back to the requested selector keeps the final key distinct
+    // from the provisional key the restore probed with. That key must never
+    // be written to: later runs match it exactly and would stop falling back
+    // to the prefix search that finds the versioned caches.
+    const resolvedRuntimeVersion = request
+      ? await getInstalledRuntimeVersion(request.name, result.binDest) ?? request.version
+      : undefined
+    finalizeCache(restoredCache, resolvedRuntimeVersion)
+  }
 
-  await restoreCache(inputs)
+  setOutputs(inputs, result.binDest, runtime)
 
   if (inputs.install) {
     pnpmInstall(inputs)
