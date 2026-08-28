@@ -226,9 +226,10 @@ jobs:
           if [ "${OUT_NAME}" != "node" ]; then
             echo "Expected outputs.runtime-name=node, got ${OUT_NAME}"; exit 1
           fi
-          if [ "${OUT_VERSION}" != "22" ]; then
-            echo "Expected outputs.runtime-version=22, got ${OUT_VERSION}"; exit 1
-          fi
+          case "${OUT_VERSION}" in
+            22.*) ;;
+            *) echo "Expected outputs.runtime-version=22.x, got ${OUT_VERSION}"; exit 1 ;;
+          esac
           if [ ! -d node_modules/is-odd ]; then
             echo "Expected pnpm install to populate node_modules/is-odd"; exit 1
           fi
@@ -333,10 +334,10 @@ jobs:
             echo "Expected outputs.runtime-name=node, got ${OUT_NAME}"
             exit 1
           fi
-          if [ "${OUT_VERSION}" != "${EXPECTED_VERSION}" ]; then
-            echo "Expected outputs.runtime-version=${EXPECTED_VERSION}, got ${OUT_VERSION}"
-            exit 1
-          fi
+          case "${OUT_VERSION}" in
+            "${EXPECTED_VERSION}".*) ;;
+            *) echo "Expected outputs.runtime-version=${EXPECTED_VERSION}.x, got ${OUT_VERSION}"; exit 1 ;;
+          esac
         shell: bash
 
   runtime-bun:
@@ -434,11 +435,23 @@ jobs:
             echo "Expected outputs.runtime-version=1.3.13, got ${OUT_VERSION}"
             exit 1
           fi
-          expected='[{"name":"bun","version":"1.3.13"},{"name":"node","version":"24"}]'
-          if [ "${OUT_RUNTIMES}" != "${expected}" ]; then
-            echo "Expected outputs.runtimes=${expected}, got ${OUT_RUNTIMES}"
+          # Declaration order is part of the contract, and each version must be
+          # the one that landed rather than the selector that was asked for.
+          first="$(printf '%s' "${OUT_RUNTIMES}" | jq -r '.[0].name + "@" + .[0].version')"
+          second="$(printf '%s' "${OUT_RUNTIMES}" | jq -r '.[1].name + "@" + .[1].version')"
+          count="$(printf '%s' "${OUT_RUNTIMES}" | jq -r 'length')"
+          if [ "${count}" != "2" ]; then
+            echo "Expected 2 entries in outputs.runtimes, got ${count}: ${OUT_RUNTIMES}"
             exit 1
           fi
+          if [ "${first}" != "bun@1.3.13" ]; then
+            echo "Expected outputs.runtimes[0]=bun@1.3.13, got ${first}"
+            exit 1
+          fi
+          case "${second}" in
+            node@24.*) ;;
+            *) echo "Expected outputs.runtimes[1]=node@24.x, got ${second}"; exit 1 ;;
+          esac
           # `pnpm install` should have run automatically — node_modules must exist.
           if [ ! -d node_modules/is-odd ]; then
             echo "Expected pnpm install to have populated node_modules/is-odd"

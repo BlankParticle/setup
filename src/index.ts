@@ -46,20 +46,27 @@ async function runMain() {
     logSkippedRuntime()
   }
 
+  // `pnpm runtime set` takes a selector, so `runtimes` holds what was asked
+  // for — `node@lts`, `node@24`. Both the outputs and the cache key promise
+  // the version that actually landed, so read it back once and use it for
+  // both. Falling back to the selector also keeps the final cache key
+  // distinct from the provisional key the restore probed with; that key must
+  // never be written to, or later runs would match it exactly and stop
+  // falling back to the prefix search that finds the versioned caches.
+  const installedVersions = await getInstalledRuntimeVersions(
+    runtimes.map(runtime => runtime.name),
+    result.binDest,
+  )
+  const installed = runtimes.map(runtime => ({
+    name: runtime.name,
+    version: installedVersions.get(runtime.name) ?? runtime.version,
+  }))
+
   if (restoredCache) {
-    // Falling back to the requested selector keeps the final key distinct
-    // from the provisional key the restore probed with. That key must never
-    // be written to: later runs match it exactly and would stop falling back
-    // to the prefix search that finds the versioned caches.
-    const installed = await getInstalledRuntimeVersions(runtimes.map(runtime => runtime.name), result.binDest)
-    const resolved = runtimes.map(runtime => ({
-      name: runtime.name,
-      version: installed.get(runtime.name) ?? runtime.version,
-    }))
-    finalizeCache(restoredCache, resolved)
+    finalizeCache(restoredCache, installed)
   }
 
-  setOutputs(inputs, result.binDest, runtimes)
+  setOutputs(inputs, result.binDest, installed)
 
   if (inputs.install) {
     pnpmInstall(inputs, runtimes.length > 0)

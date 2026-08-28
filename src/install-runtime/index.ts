@@ -59,14 +59,15 @@ export async function installRuntime(
 }
 
 /**
- * Read the versions `pnpm runtime set` actually installed, so a moving
- * selector such as `node@lts` is cached under the version it resolved to.
- * One listing covers every runtime, so this stays a single subprocess no
- * matter how many `devEngines.runtime` declares.
+ * Read the versions `pnpm runtime set` actually installed, so that a moving
+ * selector such as `node@lts` is reported and cached under the version it
+ * resolved to. One listing covers every runtime, so this stays a single
+ * subprocess no matter how many `devEngines.runtime` declares.
  *
- * This only refines a cache key, so it must never fail the run: a change in
- * `pnpm list --json` output would otherwise break setup for every workflow
- * that enables the cache. Report the problem and let the caller fall back.
+ * This only refines outputs and a cache key, so it must never fail the run:
+ * a change in `pnpm list --json` output would otherwise break setup for every
+ * workflow that installs a runtime. Report the problem and let the caller
+ * fall back to the requested selector.
  */
 export async function getInstalledRuntimeVersions(
   names: readonly RuntimeName[],
@@ -155,9 +156,11 @@ function readDevEngineEntries(inputs: Inputs): DevEngineRuntimeEntry[] {
   return Array.isArray(runtime) ? (runtime as DevEngineRuntimeEntry[]) : [runtime as DevEngineRuntimeEntry]
 }
 
+// Resolve through the deduped list so an explicit `runtime` input picks the
+// same declaration the manifest-driven path would, and warns about the
+// duplicate the same way.
 function readDevEngineVersion(inputs: Inputs, name: RuntimeName): string | undefined {
-  const match = readDevEngineEntries(inputs).find(e => e.name === name)
-  return match?.version
+  return readDevEngineRuntimes(inputs).find(runtime => runtime.name === name)?.version
 }
 
 function readDevEngineRuntimes(inputs: Inputs): RuntimeRequest[] {
